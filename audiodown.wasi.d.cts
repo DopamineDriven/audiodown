@@ -11,13 +11,8 @@ export type ExpandedAudioSpecs = AudioSpecs
 export type Mp3Meta = AudioSpecs & { kind: 'mp3'; format: 'mp3'; ext: 'mp3'; mime: 'audio/mpeg' }
 export type WavMeta = AudioSpecs & { kind: 'wav'; format: 'wav'; ext: 'wav'; mime: 'audio/wav' }
 
-/**
- * Which binding artifact the generated loader actually loaded: `'native'` for
- * a native addon, otherwise the `platformArchABI` of the WASI flavor. Every
- * flavor napi-rs can build is listed, because `NAPI_RS_NATIVE_LIBRARY_PATH`
- * can point the loader at a WASI artifact this package does not build itself.
- */
-export declare const __napiBindingTarget: 'native' | 'wasm32-wasi' | 'wasm32-wasip1'
+/** The WASI flavor this loader instantiates. */
+export declare const __napiBindingTarget: 'wasm32-wasi'
 
 /**
  * One audio buffer, copied exactly once into shared memory. Sync methods
@@ -49,12 +44,7 @@ export declare class AudioDown {
  * `AudioDown.pcm()` / `pcmAsync()` or from your own `Float32Array`.
  */
 export declare class AudioPcm {
-  constructor(
-    samples: Float32Array,
-    sampleRate: number,
-    channels: number,
-    defaults?: WaveformOptions | undefined | null
-  )
+  constructor(samples: Float32Array, sampleRate: number, channels: number, defaults?: WaveformOptions | undefined | null)
   get sampleRate(): number
   get channels(): number
   /** Frames per channel. */
@@ -89,28 +79,10 @@ export declare class AudioService {
   decodeAudioAsync(data: Uint8Array, options?: DecodeOptions | undefined | null): Promise<DecodedAudio>
   waveformPeaks(data: Uint8Array, options?: WaveformOptions | undefined | null): WaveformPeaks
   waveformPeaksAsync(data: Uint8Array, options?: WaveformOptions | undefined | null): Promise<WaveformPeaks>
-  waveformFromPcm(
-    samples: Float32Array,
-    sampleRate: number,
-    channels: number,
-    options?: WaveformOptions | undefined | null
-  ): WaveformPeaks
-  waveformFromPcmAsync(
-    samples: Float32Array,
-    sampleRate: number,
-    channels: number,
-    options?: WaveformOptions | undefined | null
-  ): Promise<WaveformPeaks>
-  analyzeAudio(
-    data: Uint8Array,
-    options?: WaveformOptions | undefined | null,
-    source?: string | undefined | null
-  ): AudioAnalysis
-  analyzeAudioAsync(
-    data: Uint8Array,
-    options?: WaveformOptions | undefined | null,
-    source?: string | undefined | null
-  ): Promise<AudioAnalysis>
+  waveformFromPcm(samples: Float32Array, sampleRate: number, channels: number, options?: WaveformOptions | undefined | null): WaveformPeaks
+  waveformFromPcmAsync(samples: Float32Array, sampleRate: number, channels: number, options?: WaveformOptions | undefined | null): Promise<WaveformPeaks>
+  analyzeAudio(data: Uint8Array, options?: WaveformOptions | undefined | null, source?: string | undefined | null): AudioAnalysis
+  analyzeAudioAsync(data: Uint8Array, options?: WaveformOptions | undefined | null, source?: string | undefined | null): Promise<AudioAnalysis>
   /**
    * Snapshot a buffer once and reuse it across metadata, decode, waveform
    * and analyze calls. Inherits this service's defaults.
@@ -118,17 +90,9 @@ export declare class AudioService {
   open(data: Uint8Array, source?: string | undefined | null): AudioDown
 }
 
-export declare function analyzeAudio(
-  data: Uint8Array,
-  options?: WaveformOptions | undefined | null,
-  source?: string | undefined | null
-): AudioAnalysis
+export declare function analyzeAudio(data: Uint8Array, options?: WaveformOptions | undefined | null, source?: string | undefined | null): AudioAnalysis
 
-export declare function analyzeAudioAsync(
-  data: Uint8Array,
-  options?: WaveformOptions | undefined | null,
-  source?: string | undefined | null
-): Promise<AudioAnalysis>
+export declare function analyzeAudioAsync(data: Uint8Array, options?: WaveformOptions | undefined | null, source?: string | undefined | null): Promise<AudioAnalysis>
 
 export interface AudioAnalysis {
   specs: AudioSpecs
@@ -238,10 +202,7 @@ export interface AudioTags {
 
 export declare function decodeAudio(data: Uint8Array, options?: DecodeOptions | undefined | null): DecodedAudio
 
-export declare function decodeAudioAsync(
-  data: Uint8Array,
-  options?: DecodeOptions | undefined | null
-): Promise<DecodedAudio>
+export declare function decodeAudioAsync(data: Uint8Array, options?: DecodeOptions | undefined | null): Promise<DecodedAudio>
 
 export interface DecodedAudio {
   /** Interleaved frames: `L0 R0 L1 R1 ...` for stereo. */
@@ -319,19 +280,9 @@ export interface WaveformChannel {
   rms: Float64Array
 }
 
-export declare function waveformFromPcm(
-  samples: Float32Array,
-  sampleRate: number,
-  channels: number,
-  options?: WaveformOptions | undefined | null
-): WaveformPeaks
+export declare function waveformFromPcm(samples: Float32Array, sampleRate: number, channels: number, options?: WaveformOptions | undefined | null): WaveformPeaks
 
-export declare function waveformFromPcmAsync(
-  samples: Float32Array,
-  sampleRate: number,
-  channels: number,
-  options?: WaveformOptions | undefined | null
-): Promise<WaveformPeaks>
+export declare function waveformFromPcmAsync(samples: Float32Array, sampleRate: number, channels: number, options?: WaveformOptions | undefined | null): Promise<WaveformPeaks>
 
 export interface WaveformOptions {
   /** Target bucket count (capped at the frame count). Default `1024`. Exclusive with `samplesPerPeak`. */
@@ -368,10 +319,7 @@ export interface WaveformPeaks {
   skippedPackets: number
 }
 
-export declare function waveformPeaksAsync(
-  data: Uint8Array,
-  options?: WaveformOptions | undefined | null
-): Promise<WaveformPeaks>
+export declare function waveformPeaksAsync(data: Uint8Array, options?: WaveformOptions | undefined | null): Promise<WaveformPeaks>
 
 export interface XingHeader {
   kind: XingKind
