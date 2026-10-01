@@ -25,6 +25,7 @@ __metadata:
     "@types/node": "npm:^26.6.3"
     ava: "npm:^8.0.1"
     chalk: "npm:^6.0.1"
+    emnapi: "npm:^1.11.3"
     husky: "npm:^9.1.7"
     lint-staged: "npm:^17.6.0"
     npm-run-all2: "npm:^9.0.3"
@@ -1949,6 +1950,18 @@ __metadata:
   version: 2.1.0
   resolution: "emittery@npm:2.1.0"
   checksum: 10c0/f5fb436699e217c9b464c051bdb9134e7c6e5eb26d8487ac72ff7df6e5c8405678ecf2bfef38ab06610673dd0313ac48567a90dcfd4b6a61822f7c18269c7d3e
+  languageName: node
+  linkType: hard
+
+"emnapi@npm:^1.11.3":
+  version: 1.11.3
+  resolution: "emnapi@npm:1.11.3"
+  peerDependencies:
+    node-addon-api: ">= 6.1.0"
+  peerDependenciesMeta:
+    node-addon-api:
+      optional: true
+  checksum: 10c0/db54d41a412a6d009f6840bacb4c0076ed27f7305569a1c00ddf1314636f32a266c4a84a9a5d18a7bb7a5f9359aebf2af0f130fdd037c82591fb7b3ea22ccc8a
   languageName: node
   linkType: hard
 

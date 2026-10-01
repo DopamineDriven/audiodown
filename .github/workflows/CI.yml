@@ -16,6 +16,7 @@ on:
       - '**/*.gitignore'
       - .editorconfig
       - docs/**
+      - adr/**
   pull_request:
     branches:
       - main

@@ -80,15 +80,6 @@ pub enum WavContainer {
   Rf64,
 }
 
-impl WavContainer {
-  pub fn as_str(self) -> &'static str {
-    match self {
-      WavContainer::Riff => "RIFF",
-      WavContainer::Rf64 => "RF64",
-    }
-  }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MpegFrame {
   pub offset: usize,

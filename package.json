@@ -83,6 +83,7 @@
     "@types/node": "^26.6.3",
     "ava": "^8.0.1",
     "chalk": "^6.0.1",
+    "emnapi": "^1.11.3",
     "husky": "^9.1.7",
     "lint-staged": "^17.6.0",
     "npm-run-all2": "^9.0.3",
@@ -106,7 +107,9 @@
     "files": [
       "__test__/**/*.spec.ts"
     ],
-    "extensions": ["ts"],
+    "extensions": [
+      "ts"
+    ],
     "timeout": "2m",
     "workerThreads": false,
     "environmentVariables": {

@@ -4,13 +4,19 @@
 //! rayon waveform envelopes for Node.
 //!
 //! Layout follows pdfdown: this file is the Node-API surface (functions,
-//! `AsyncTask` impls, classes), `types.rs` holds the JS boundary types and
-//! `core/` is pure Rust.
+//! promise-returning async variants, classes), `types.rs` holds the JS
+//! boundary types and `core/` is pure Rust.
+//!
+//! Every `*Async` function and method returns an [`AsyncBlock`]: the input is
+//! snapshotted synchronously on the JS thread, the CPU work runs on tokio's
+//! blocking pool via [`spawn_blocking`], and the result is converted to JS
+//! values back on the JS thread when the promise resolves. Nothing blocks the
+//! event loop, and nothing competes with Node's libuv pool.
 
 use std::sync::Arc;
 
+use napi::Env;
 use napi::bindgen_prelude::*;
-use napi::{Env, Task};
 use napi_derive::napi;
 
 mod core;
@@ -43,6 +49,29 @@ fn integer(value: f64, name: &str, max: usize) -> Result<usize> {
     return Err(invalid(format!("{name} must be an integer in 1..={max}")));
   }
   Ok(value as usize)
+}
+
+// ── Promises ────────────────────────────────────────────────────
+
+/// Run CPU-bound `work` on tokio's blocking pool and resolve a JS promise
+/// with it. `map` runs on the JS thread once the work finishes, which is where
+/// typed arrays and class instances have to be created.
+fn promise<V, T, W, M>(env: &Env, work: W, map: M) -> Result<AsyncBlock<T>>
+where
+  V: Send + 'static,
+  T: ToNapiValue + 'static,
+  W: FnOnce() -> Result<V> + Send + 'static,
+  M: FnOnce(Env, V) -> Result<T> + 'static,
+{
+  AsyncBlockBuilder::build_with_map(
+    env,
+    async move {
+      spawn_blocking(work)
+        .await
+        .map_err(|e| fail(format!("audiodown worker failed: {e}")))?
+    },
+    map,
+  )
 }
 
 // ── Option resolution ───────────────────────────────────────────
@@ -109,26 +138,98 @@ fn parse_specs(
   ))
 }
 
+/// Promise flavour of [`parse_specs`] over a shared snapshot.
+fn parse_specs_async(
+  env: &Env,
+  data: Arc<Vec<u8>>,
+  kind: Option<meta::AudioKind>,
+  source: Option<String>,
+) -> Result<AsyncBlock<AudioSpecs>> {
+  let len = data.len();
+  promise(
+    env,
+    move || parse_kind(&data, kind),
+    move |_, meta| Ok(types::audio_specs(meta, len, source)),
+  )
+}
+
 fn decode_pcm(data: Arc<Vec<u8>>, config: DecodeConfig) -> Result<Pcm> {
   decode::decode(data, config).map_err(fail)
+}
+
+fn decode_pcm_async(
+  env: &Env,
+  data: Arc<Vec<u8>>,
+  config: DecodeConfig,
+) -> Result<AsyncBlock<DecodedAudio>> {
+  promise(
+    env,
+    move || decode_pcm(data, config),
+    |_, pcm| Ok(pcm.into()),
+  )
 }
 
 fn reduce(pcm: &Pcm, config: WaveformConfig) -> Result<Waveform> {
   waveform::peaks(pcm, config).map_err(fail)
 }
 
+fn reduce_async(
+  env: &Env,
+  pcm: Arc<Pcm>,
+  config: WaveformConfig,
+) -> Result<AsyncBlock<WaveformPeaks>> {
+  promise(env, move || reduce(&pcm, config), |_, wave| Ok(wave.into()))
+}
+
 fn decode_and_reduce(data: Arc<Vec<u8>>, dc: DecodeConfig, wc: WaveformConfig) -> Result<Waveform> {
   reduce(&decode_pcm(data, dc)?, wc)
+}
+
+fn decode_and_reduce_async(
+  env: &Env,
+  data: Arc<Vec<u8>>,
+  dc: DecodeConfig,
+  wc: WaveformConfig,
+) -> Result<AsyncBlock<WaveformPeaks>> {
+  promise(
+    env,
+    move || decode_and_reduce(data, dc, wc),
+    |_, wave| Ok(wave.into()),
+  )
 }
 
 fn analyze(
   data: Arc<Vec<u8>>,
   dc: DecodeConfig,
   wc: WaveformConfig,
-) -> Result<(AudioMeta, usize, Waveform)> {
+  source: Option<String>,
+) -> Result<AudioAnalysis> {
   let len = data.len();
   let (meta, wave) = core::analyze(data, dc, wc).map_err(fail)?;
-  Ok((meta, len, wave))
+  Ok(AudioAnalysis {
+    specs: types::audio_specs(meta, len, source),
+    waveform: wave.into(),
+  })
+}
+
+fn analyze_async(
+  env: &Env,
+  data: Arc<Vec<u8>>,
+  dc: DecodeConfig,
+  wc: WaveformConfig,
+  source: Option<String>,
+) -> Result<AsyncBlock<AudioAnalysis>> {
+  let len = data.len();
+  promise(
+    env,
+    move || core::analyze(data, dc, wc).map_err(fail),
+    move |_, (meta, wave)| {
+      Ok(AudioAnalysis {
+        specs: types::audio_specs(meta, len, source),
+        waveform: wave.into(),
+      })
+    },
+  )
 }
 
 fn pcm_from_js(samples: &[f32], sample_rate: f64, channels: f64, max: usize) -> Result<Pcm> {
@@ -149,137 +250,6 @@ fn pcm_from_js(samples: &[f32], sample_rate: f64, channels: f64, max: usize) -> 
   })
 }
 
-// ── Tasks (libuv thread pool) ───────────────────────────────────
-
-pub struct ParseTask {
-  data: Arc<Vec<u8>>,
-  kind: Option<meta::AudioKind>,
-  source: Option<String>,
-}
-
-#[napi]
-impl Task for ParseTask {
-  type Output = AudioMeta;
-  type JsValue = AudioSpecs;
-
-  fn compute(&mut self) -> Result<Self::Output> {
-    parse_kind(&self.data, self.kind)
-  }
-
-  fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-    Ok(types::audio_specs(
-      output,
-      self.data.len(),
-      self.source.take(),
-    ))
-  }
-}
-
-pub struct DecodeTask {
-  data: Arc<Vec<u8>>,
-  config: DecodeConfig,
-}
-
-#[napi]
-impl Task for DecodeTask {
-  type Output = Pcm;
-  type JsValue = DecodedAudio;
-
-  fn compute(&mut self) -> Result<Self::Output> {
-    decode_pcm(Arc::clone(&self.data), self.config)
-  }
-
-  fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-    Ok(output.into())
-  }
-}
-
-pub struct WaveformTask {
-  data: Arc<Vec<u8>>,
-  dc: DecodeConfig,
-  wc: WaveformConfig,
-}
-
-#[napi]
-impl Task for WaveformTask {
-  type Output = Waveform;
-  type JsValue = WaveformPeaks;
-
-  fn compute(&mut self) -> Result<Self::Output> {
-    decode_and_reduce(Arc::clone(&self.data), self.dc, self.wc)
-  }
-
-  fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-    Ok(output.into())
-  }
-}
-
-pub struct PcmWaveformTask {
-  pcm: Arc<Pcm>,
-  config: WaveformConfig,
-}
-
-#[napi]
-impl Task for PcmWaveformTask {
-  type Output = Waveform;
-  type JsValue = WaveformPeaks;
-
-  fn compute(&mut self) -> Result<Self::Output> {
-    reduce(&self.pcm, self.config)
-  }
-
-  fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-    Ok(output.into())
-  }
-}
-
-pub struct AnalyzeTask {
-  data: Arc<Vec<u8>>,
-  dc: DecodeConfig,
-  wc: WaveformConfig,
-  source: Option<String>,
-}
-
-#[napi]
-impl Task for AnalyzeTask {
-  type Output = (AudioMeta, usize, Waveform);
-  type JsValue = AudioAnalysis;
-
-  fn compute(&mut self) -> Result<Self::Output> {
-    analyze(Arc::clone(&self.data), self.dc, self.wc)
-  }
-
-  fn resolve(&mut self, _env: Env, (meta, len, wave): Self::Output) -> Result<Self::JsValue> {
-    Ok(AudioAnalysis {
-      specs: types::audio_specs(meta, len, self.source.take()),
-      waveform: wave.into(),
-    })
-  }
-}
-
-pub struct PcmTask {
-  data: Arc<Vec<u8>>,
-  config: DecodeConfig,
-  defaults: WaveformOptions,
-}
-
-#[napi]
-impl Task for PcmTask {
-  type Output = Pcm;
-  type JsValue = AudioPcm;
-
-  fn compute(&mut self) -> Result<Self::Output> {
-    decode_pcm(Arc::clone(&self.data), self.config)
-  }
-
-  fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-    Ok(AudioPcm {
-      pcm: Arc::new(output),
-      defaults: self.defaults.clone(),
-    })
-  }
-}
-
 // ── Standalone functions ────────────────────────────────────────
 
 /// Cheap magic sniff: `'mp3'`, `'wav'` or `null`.
@@ -294,12 +264,12 @@ pub fn parse_audio(data: &[u8], source: Option<String>) -> Result<AudioSpecs> {
 }
 
 #[napi]
-pub fn parse_audio_async(data: &[u8], source: Option<String>) -> AsyncTask<ParseTask> {
-  AsyncTask::new(ParseTask {
-    data: snapshot(data),
-    kind: None,
-    source,
-  })
+pub fn parse_audio_async(
+  env: &Env,
+  data: &[u8],
+  source: Option<String>,
+) -> Result<AsyncBlock<AudioSpecs>> {
+  parse_specs_async(env, snapshot(data), None, source)
 }
 
 #[napi(ts_return_type = "Mp3Meta")]
@@ -308,12 +278,12 @@ pub fn parse_mp3(data: &[u8], source: Option<String>) -> Result<AudioSpecs> {
 }
 
 #[napi(ts_return_type = "Promise<Mp3Meta>")]
-pub fn parse_mp3_async(data: &[u8], source: Option<String>) -> AsyncTask<ParseTask> {
-  AsyncTask::new(ParseTask {
-    data: snapshot(data),
-    kind: Some(meta::AudioKind::Mp3),
-    source,
-  })
+pub fn parse_mp3_async(
+  env: &Env,
+  data: &[u8],
+  source: Option<String>,
+) -> Result<AsyncBlock<AudioSpecs>> {
+  parse_specs_async(env, snapshot(data), Some(meta::AudioKind::Mp3), source)
 }
 
 #[napi(ts_return_type = "WavMeta")]
@@ -322,12 +292,12 @@ pub fn parse_wav(data: &[u8], source: Option<String>) -> Result<AudioSpecs> {
 }
 
 #[napi(ts_return_type = "Promise<WavMeta>")]
-pub fn parse_wav_async(data: &[u8], source: Option<String>) -> AsyncTask<ParseTask> {
-  AsyncTask::new(ParseTask {
-    data: snapshot(data),
-    kind: Some(meta::AudioKind::Wav),
-    source,
-  })
+pub fn parse_wav_async(
+  env: &Env,
+  data: &[u8],
+  source: Option<String>,
+) -> Result<AsyncBlock<AudioSpecs>> {
+  parse_specs_async(env, snapshot(data), Some(meta::AudioKind::Wav), source)
 }
 
 #[napi]
@@ -338,13 +308,12 @@ pub fn decode_audio(data: &[u8], options: Option<DecodeOptions>) -> Result<Decod
 
 #[napi]
 pub fn decode_audio_async(
+  env: &Env,
   data: &[u8],
   options: Option<DecodeOptions>,
-) -> Result<AsyncTask<DecodeTask>> {
-  Ok(AsyncTask::new(DecodeTask {
-    data: snapshot(data),
-    config: decode_config(&options.unwrap_or_default())?,
-  }))
+) -> Result<AsyncBlock<DecodedAudio>> {
+  let config = decode_config(&options.unwrap_or_default())?;
+  decode_pcm_async(env, snapshot(data), config)
 }
 
 #[napi]
@@ -355,15 +324,12 @@ pub fn waveform_peaks(data: &[u8], options: Option<WaveformOptions>) -> Result<W
 
 #[napi]
 pub fn waveform_peaks_async(
+  env: &Env,
   data: &[u8],
   options: Option<WaveformOptions>,
-) -> Result<AsyncTask<WaveformTask>> {
+) -> Result<AsyncBlock<WaveformPeaks>> {
   let (dc, wc) = waveform_configs(&options.unwrap_or_default())?;
-  Ok(AsyncTask::new(WaveformTask {
-    data: snapshot(data),
-    dc,
-    wc,
-  }))
+  decode_and_reduce_async(env, snapshot(data), dc, wc)
 }
 
 #[napi]
@@ -380,21 +346,15 @@ pub fn waveform_from_pcm(
 
 #[napi]
 pub fn waveform_from_pcm_async(
+  env: &Env,
   samples: &[f32],
   sample_rate: f64,
   channels: f64,
   options: Option<WaveformOptions>,
-) -> Result<AsyncTask<PcmWaveformTask>> {
+) -> Result<AsyncBlock<WaveformPeaks>> {
   let (dc, wc) = waveform_configs(&options.unwrap_or_default())?;
-  Ok(AsyncTask::new(PcmWaveformTask {
-    pcm: Arc::new(pcm_from_js(
-      samples,
-      sample_rate,
-      channels,
-      dc.max_decoded_samples,
-    )?),
-    config: wc,
-  }))
+  let pcm = pcm_from_js(samples, sample_rate, channels, dc.max_decoded_samples)?;
+  reduce_async(env, Arc::new(pcm), wc)
 }
 
 #[napi]
@@ -404,26 +364,18 @@ pub fn analyze_audio(
   source: Option<String>,
 ) -> Result<AudioAnalysis> {
   let (dc, wc) = waveform_configs(&options.unwrap_or_default())?;
-  let (meta, len, wave) = analyze(snapshot(data), dc, wc)?;
-  Ok(AudioAnalysis {
-    specs: types::audio_specs(meta, len, source),
-    waveform: wave.into(),
-  })
+  analyze(snapshot(data), dc, wc, source)
 }
 
 #[napi]
 pub fn analyze_audio_async(
+  env: &Env,
   data: &[u8],
   options: Option<WaveformOptions>,
   source: Option<String>,
-) -> Result<AsyncTask<AnalyzeTask>> {
+) -> Result<AsyncBlock<AudioAnalysis>> {
   let (dc, wc) = waveform_configs(&options.unwrap_or_default())?;
-  Ok(AsyncTask::new(AnalyzeTask {
-    data: snapshot(data),
-    dc,
-    wc,
-    source,
-  }))
+  analyze_async(env, snapshot(data), dc, wc, source)
 }
 
 // ── AudioService: stateless service, same shape as the TS package ──
@@ -461,8 +413,13 @@ impl AudioService {
   }
 
   #[napi]
-  pub fn parse_audio_async(&self, data: &[u8], source: Option<String>) -> AsyncTask<ParseTask> {
-    parse_audio_async(data, source)
+  pub fn parse_audio_async(
+    &self,
+    env: &Env,
+    data: &[u8],
+    source: Option<String>,
+  ) -> Result<AsyncBlock<AudioSpecs>> {
+    parse_audio_async(env, data, source)
   }
 
   #[napi(ts_return_type = "Mp3Meta")]
@@ -471,8 +428,13 @@ impl AudioService {
   }
 
   #[napi(ts_return_type = "Promise<Mp3Meta>")]
-  pub fn parse_mp3_async(&self, data: &[u8], source: Option<String>) -> AsyncTask<ParseTask> {
-    parse_mp3_async(data, source)
+  pub fn parse_mp3_async(
+    &self,
+    env: &Env,
+    data: &[u8],
+    source: Option<String>,
+  ) -> Result<AsyncBlock<AudioSpecs>> {
+    parse_mp3_async(env, data, source)
   }
 
   #[napi(ts_return_type = "WavMeta")]
@@ -481,8 +443,13 @@ impl AudioService {
   }
 
   #[napi(ts_return_type = "Promise<WavMeta>")]
-  pub fn parse_wav_async(&self, data: &[u8], source: Option<String>) -> AsyncTask<ParseTask> {
-    parse_wav_async(data, source)
+  pub fn parse_wav_async(
+    &self,
+    env: &Env,
+    data: &[u8],
+    source: Option<String>,
+  ) -> Result<AsyncBlock<AudioSpecs>> {
+    parse_wav_async(env, data, source)
   }
 
   #[napi]
@@ -493,10 +460,11 @@ impl AudioService {
   #[napi]
   pub fn decode_audio_async(
     &self,
+    env: &Env,
     data: &[u8],
     options: Option<DecodeOptions>,
-  ) -> Result<AsyncTask<DecodeTask>> {
-    decode_audio_async(data, Some(self.defaults.merged_decode(options)))
+  ) -> Result<AsyncBlock<DecodedAudio>> {
+    decode_audio_async(env, data, Some(self.defaults.merged_decode(options)))
   }
 
   #[napi]
@@ -511,10 +479,11 @@ impl AudioService {
   #[napi]
   pub fn waveform_peaks_async(
     &self,
+    env: &Env,
     data: &[u8],
     options: Option<WaveformOptions>,
-  ) -> Result<AsyncTask<WaveformTask>> {
-    waveform_peaks_async(data, Some(self.defaults.merged(options)))
+  ) -> Result<AsyncBlock<WaveformPeaks>> {
+    waveform_peaks_async(env, data, Some(self.defaults.merged(options)))
   }
 
   #[napi]
@@ -536,12 +505,14 @@ impl AudioService {
   #[napi]
   pub fn waveform_from_pcm_async(
     &self,
+    env: &Env,
     samples: &[f32],
     sample_rate: f64,
     channels: f64,
     options: Option<WaveformOptions>,
-  ) -> Result<AsyncTask<PcmWaveformTask>> {
+  ) -> Result<AsyncBlock<WaveformPeaks>> {
     waveform_from_pcm_async(
+      env,
       samples,
       sample_rate,
       channels,
@@ -562,11 +533,12 @@ impl AudioService {
   #[napi]
   pub fn analyze_audio_async(
     &self,
+    env: &Env,
     data: &[u8],
     options: Option<WaveformOptions>,
     source: Option<String>,
-  ) -> Result<AsyncTask<AnalyzeTask>> {
-    analyze_audio_async(data, Some(self.defaults.merged(options)), source)
+  ) -> Result<AsyncBlock<AudioAnalysis>> {
+    analyze_audio_async(env, data, Some(self.defaults.merged(options)), source)
   }
 
   /// Snapshot a buffer once and reuse it across metadata, decode, waveform
@@ -633,12 +605,13 @@ impl AudioDown {
   }
 
   #[napi]
-  pub fn metadata_async(&self) -> AsyncTask<ParseTask> {
-    AsyncTask::new(ParseTask {
-      data: Arc::clone(&self.data),
-      kind: Some(self.kind),
-      source: self.source.clone(),
-    })
+  pub fn metadata_async(&self, env: &Env) -> Result<AsyncBlock<AudioSpecs>> {
+    parse_specs_async(
+      env,
+      Arc::clone(&self.data),
+      Some(self.kind),
+      self.source.clone(),
+    )
   }
 
   #[napi]
@@ -648,11 +621,13 @@ impl AudioDown {
   }
 
   #[napi]
-  pub fn decode_async(&self, options: Option<DecodeOptions>) -> Result<AsyncTask<DecodeTask>> {
-    Ok(AsyncTask::new(DecodeTask {
-      data: Arc::clone(&self.data),
-      config: decode_config(&self.defaults.merged_decode(options))?,
-    }))
+  pub fn decode_async(
+    &self,
+    env: &Env,
+    options: Option<DecodeOptions>,
+  ) -> Result<AsyncBlock<DecodedAudio>> {
+    let config = decode_config(&self.defaults.merged_decode(options))?;
+    decode_pcm_async(env, Arc::clone(&self.data), config)
   }
 
   #[napi]
@@ -664,35 +639,27 @@ impl AudioDown {
   #[napi]
   pub fn waveform_async(
     &self,
+    env: &Env,
     options: Option<WaveformOptions>,
-  ) -> Result<AsyncTask<WaveformTask>> {
+  ) -> Result<AsyncBlock<WaveformPeaks>> {
     let (dc, wc) = waveform_configs(&self.defaults.merged(options))?;
-    Ok(AsyncTask::new(WaveformTask {
-      data: Arc::clone(&self.data),
-      dc,
-      wc,
-    }))
+    decode_and_reduce_async(env, Arc::clone(&self.data), dc, wc)
   }
 
   #[napi]
   pub fn analyze(&self, options: Option<WaveformOptions>) -> Result<AudioAnalysis> {
     let (dc, wc) = waveform_configs(&self.defaults.merged(options))?;
-    let (meta, len, wave) = analyze(Arc::clone(&self.data), dc, wc)?;
-    Ok(AudioAnalysis {
-      specs: types::audio_specs(meta, len, self.source.clone()),
-      waveform: wave.into(),
-    })
+    analyze(Arc::clone(&self.data), dc, wc, self.source.clone())
   }
 
   #[napi]
-  pub fn analyze_async(&self, options: Option<WaveformOptions>) -> Result<AsyncTask<AnalyzeTask>> {
+  pub fn analyze_async(
+    &self,
+    env: &Env,
+    options: Option<WaveformOptions>,
+  ) -> Result<AsyncBlock<AudioAnalysis>> {
     let (dc, wc) = waveform_configs(&self.defaults.merged(options))?;
-    Ok(AsyncTask::new(AnalyzeTask {
-      data: Arc::clone(&self.data),
-      dc,
-      wc,
-      source: self.source.clone(),
-    }))
+    analyze_async(env, Arc::clone(&self.data), dc, wc, self.source.clone())
   }
 
   /// Decode once into an `AudioPcm` handle, then reduce it at any number of
@@ -707,12 +674,24 @@ impl AudioDown {
   }
 
   #[napi]
-  pub fn pcm_async(&self, options: Option<DecodeOptions>) -> Result<AsyncTask<PcmTask>> {
-    Ok(AsyncTask::new(PcmTask {
-      data: Arc::clone(&self.data),
-      config: decode_config(&self.defaults.merged_decode(options))?,
-      defaults: self.defaults.clone(),
-    }))
+  pub fn pcm_async(
+    &self,
+    env: &Env,
+    options: Option<DecodeOptions>,
+  ) -> Result<AsyncBlock<AudioPcm>> {
+    let config = decode_config(&self.defaults.merged_decode(options))?;
+    let data = Arc::clone(&self.data);
+    let defaults = self.defaults.clone();
+    promise(
+      env,
+      move || decode_pcm(data, config),
+      move |_, pcm| {
+        Ok(AudioPcm {
+          pcm: Arc::new(pcm),
+          defaults,
+        })
+      },
+    )
   }
 }
 
@@ -800,12 +779,10 @@ impl AudioPcm {
   #[napi]
   pub fn waveform_async(
     &self,
+    env: &Env,
     options: Option<WaveformOptions>,
-  ) -> Result<AsyncTask<PcmWaveformTask>> {
+  ) -> Result<AsyncBlock<WaveformPeaks>> {
     let (_, wc) = waveform_configs(&self.defaults.merged(options))?;
-    Ok(AsyncTask::new(PcmWaveformTask {
-      pcm: Arc::clone(&self.pcm),
-      config: wc,
-    }))
+    reduce_async(env, Arc::clone(&self.pcm), wc)
   }
 }

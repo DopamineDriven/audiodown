@@ -126,7 +126,11 @@ CBR detection, resync count, truncation flag), a full `XingHeader`,
 
 ### decode
 
-Symphonia 0.5.5 (`mpa`, `wav`, `pcm`, `adpcm`). `decode(Arc<Vec<u8>>, DecodeConfig)`
+Symphonia 0.6.1 (`mpa`, `wav`, `pcm`, `adpcm`, `id3v1`, `id3v2`, `opt-simd`). Gapless
+trimming is a decoder option in 0.6 (`AudioDecoderOptions::gapless`), `next_packet`
+yields `Option`, and decoded audio is read with `copy_to_vec_interleaved::<f32>`.
+0.6.1 also fixes MP3 silence decoding, Xing-with-CRC detection and a batch of
+fuzzing panics, which matters for user uploads. `decode(Arc<Vec<u8>>, DecodeConfig)`
 takes shared bytes so the `AudioDown` class never re-copies input; RF64 is
 normalised to RIFF on a private copy only when needed. Decoding is sequential
 by design: MPEG Layer III frames depend on the bit reservoir. Guards:
@@ -143,6 +147,16 @@ per-bucket allocation. The non-finite check is folded into the same pass.
 Serial and parallel produce identical output because each bucket is reduced
 sequentially. `parallel` defaults to true and kicks in above 262,144 samples.
 `analyzeAudio` runs metadata parsing and decode+reduce under `rayon::join`.
+
+## Async
+
+Every `*Async` function and method returns a napi `AsyncBlock` (feature
+`tokio_rt`): the input snapshot happens synchronously on the JS thread, the
+CPU work runs on tokio's blocking pool via `spawn_blocking`, and conversion to
+JS values (typed arrays, class instances) happens on the JS thread when the
+promise resolves through `build_with_map`. This replaced the libuv `AsyncTask`
+structs: no event-loop blocking, no contention with Node's libuv pool, and the
+generated typings are plain `Promise<T>`.
 
 ## Errors
 
