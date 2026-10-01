@@ -1,0 +1,11 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "ignorePatterns": [
+    "audio-metadata-rs/**",
+    "target/**",
+    "npm/**",
+    "*.wasi.cjs",
+    "*.wasi-browser.js",
+    "wasi-worker*.mjs"
+  ]
+}

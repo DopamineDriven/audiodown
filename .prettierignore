@@ -1,0 +1,10 @@
+target
+.yarn
+index.js
+audiodown.wasi-browser.js
+audiodown.wasi.cjs
+wasi-worker-browser.mjs
+wasi-worker.mjs
+.yarnrc.yml
+audio-metadata-rs
+__test__/fixtures
