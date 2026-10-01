@@ -12,7 +12,7 @@ It is the Rust successor to the TypeScript `AudioService`, and its output is sha
 npm install @d0paminedriven/audiodown
 # or
 yarn add @d0paminedriven/audiodown
-# or
+# or 
 pnpm add @d0paminedriven/audiodown
 ```
 
