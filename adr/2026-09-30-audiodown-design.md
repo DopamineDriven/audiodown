@@ -158,6 +158,15 @@ promise resolves through `build_with_map`. This replaced the libuv `AsyncTask`
 structs: no event-loop blocking, no contention with Node's libuv pool, and the
 generated typings are plain `Promise<T>`.
 
+wasm32-wasip1-threads needs two extra things, both found the hard way:
+`--cfg tokio_unstable` (a rustc cfg, set in `.cargo/config.toml`) or napi
+compiles the threadless branch and every async call rejects; and the CPU work
+runs inline on the tokio worker (`cfg(target_family = "wasm")` in `promise()`)
+rather than via `spawn_blocking`, because a thread created from a non-JS
+thread is relayed through the JS thread by `@napi-rs/wasm-runtime`, and that
+relay deadlocks when the JS thread is busy (reproduced with 2 ms of CPU per
+assertion: 8/8 hangs with `spawn_blocking`, 0 hangs inline).
+
 ## Errors
 
 Option validation -> `Status::InvalidArg`. Parse/decode/reduce failures ->

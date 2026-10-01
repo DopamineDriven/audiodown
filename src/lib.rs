@@ -63,15 +63,20 @@ where
   W: FnOnce() -> Result<V> + Send + 'static,
   M: FnOnce(Env, V) -> Result<T> + 'static,
 {
-  AsyncBlockBuilder::build_with_map(
-    env,
-    async move {
-      spawn_blocking(work)
-        .await
-        .map_err(|e| fail(format!("audiodown worker failed: {e}")))?
-    },
-    map,
-  )
+  // Native: hand the CPU work to tokio's blocking pool so runtime workers
+  // stay free. wasm32-wasip1-threads: run it inline on the runtime worker
+  // instead. `spawn_blocking` there creates a thread from a non-JS thread,
+  // which the wasm runtime can only satisfy by relaying through the JS
+  // thread, and that relay deadlocks under concurrent load.
+  #[cfg(not(target_family = "wasm"))]
+  let future = async move {
+    spawn_blocking(work)
+      .await
+      .map_err(|e| fail(format!("audiodown worker failed: {e}")))?
+  };
+  #[cfg(target_family = "wasm")]
+  let future = async move { work() };
+  AsyncBlockBuilder::build_with_map(env, future, map)
 }
 
 // ── Option resolution ───────────────────────────────────────────
